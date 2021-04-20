@@ -1,12 +1,13 @@
 use std::{
     error::Error,
-    io,
+    io::{self},
     net::{Ipv4Addr, SocketAddr, UdpSocket},
     sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender},
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+use dns_parser::Packet;
 #[cfg(not(target_os = "windows"))]
 use net2::unix::UnixUdpBuilderExt;
 
@@ -47,6 +48,23 @@ pub fn send_request(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub fn handle_response(packet: &Packet, from: SocketAddr) {
+    log::info!("{:?} => {:?}", from, packet);
+}
+
+pub fn recive_response(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
+    let mut buffer: [u8; 2048] = [0; 2048];
+
+    loop {
+        let (count, from) = socket.recv_from(&mut buffer)?;
+
+        match dns_parser::Packet::parse(&buffer[..count]) {
+            Ok(packet) => handle_response(&packet, from),
+            Err(e) => log::warn!("{}", e),
+        }
+    }
+}
+
 pub struct MdnsClient {
     exit_tx: SyncSender<()>,
     thread: Option<JoinHandle<()>>,
@@ -58,6 +76,7 @@ impl MdnsClient {
 
         socket.set_multicast_loop_v4(false)?;
         socket.join_multicast_v4(&MULTICAST_ADDR, &ADDR_ANY)?;
+        socket.set_nonblocking(true)?;
 
         let (exit_tx, exit_rx) = sync_channel(0);
 
@@ -66,6 +85,7 @@ impl MdnsClient {
                 Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     send_request(&socket).ok();
+                    recive_response(&socket).ok();
                 }
             }
         });
