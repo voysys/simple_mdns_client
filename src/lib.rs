@@ -1,8 +1,12 @@
-use dns_parser::{rdata::Srv, Packet, RData, ResourceRecord};
+use dns_parser::{
+    rdata::{Srv, A},
+    Packet, RData, ResourceRecord,
+};
+use if_addrs::IfAddr;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
-    io::{self},
+    io,
     net::{Ipv4Addr, SocketAddr, UdpSocket},
     sync::{
         mpsc::{sync_channel, RecvTimeoutError, SyncSender},
@@ -15,23 +19,22 @@ use std::{
 #[cfg(not(target_os = "windows"))]
 use net2::unix::UnixUdpBuilderExt;
 
-const ADDR_ANY: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MULTICAST_PORT: u16 = 5353;
 
 #[cfg(not(target_os = "windows"))]
-fn create_socket() -> io::Result<std::net::UdpSocket> {
+fn create_socket(addr: Ipv4Addr) -> io::Result<std::net::UdpSocket> {
     net2::UdpBuilder::new_v4()?
         .reuse_address(true)?
         .reuse_port(true)?
-        .bind((ADDR_ANY, MULTICAST_PORT))
+        .bind((addr, MULTICAST_PORT))
 }
 
 #[cfg(target_os = "windows")]
-fn create_socket() -> io::Result<std::net::UdpSocket> {
+fn create_socket(addr: Ipv4Addr) -> io::Result<std::net::UdpSocket> {
     net2::UdpBuilder::new_v4()?
         .reuse_address(true)?
-        .bind((ADDR_ANY, MULTICAST_PORT))
+        .bind((addr, MULTICAST_PORT))
 }
 
 pub fn send_request(socket: &UdpSocket, service: &str) -> Result<(), Box<dyn Error>> {
@@ -47,21 +50,16 @@ pub fn send_request(socket: &UdpSocket, service: &str) -> Result<(), Box<dyn Err
 
     let addr = SocketAddr::new(MULTICAST_ADDR.into(), MULTICAST_PORT);
 
-    let res = socket.send_to(&packet_data, addr);
-
-    log::debug!("Sending query: {:?}", res);
+    socket.send_to(&packet_data, addr).ok();
 
     Ok(())
 }
 
 pub fn handle_response(
     packet: &Packet,
-    from: SocketAddr,
     service: &str,
     database: &Mutex<HashMap<Service, ServiceRecord>>,
 ) {
-    log::debug!("{:?} => {:#?}", from, packet);
-
     if packet.header.query {
         return;
     }
@@ -86,8 +84,23 @@ pub fn handle_response(
                     .and_modify(|e| e.last_seen_time = Instant::now())
                     .or_insert_with(|| ServiceRecord {
                         last_seen_time: Instant::now(),
-                        addresses: Vec::new(),
+                        addresses: HashSet::new(),
                     });
+            }
+        }
+    }
+
+    for answer in &packet.answers {
+        if let ResourceRecord {
+            name,
+            data: RData::A(A(addr)),
+            ..
+        } = answer
+        {
+            for (k, v) in database.iter_mut() {
+                if k.host == name.to_string() {
+                    v.addresses.insert(*addr);
+                }
             }
         }
     }
@@ -101,13 +114,17 @@ pub fn recive_response(
     let mut buffer: [u8; 2048] = [0; 2048];
 
     loop {
-        let (count, from) = socket.recv_from(&mut buffer)?;
+        let count = socket.recv(&mut buffer)?;
 
-        match dns_parser::Packet::parse(&buffer[..count]) {
-            Ok(packet) => handle_response(&packet, from, service, database),
-            Err(e) => log::warn!("{}", e),
+        if let Ok(packet) = dns_parser::Packet::parse(&buffer[..count]) {
+            handle_response(&packet, service, database);
         }
     }
+}
+
+fn remove_old_entries(database: &Mutex<HashMap<Service, ServiceRecord>>) {
+    let mut database = database.lock().unwrap();
+    database.retain(|_, v| v.last_seen_time.elapsed() < Duration::from_secs(5));
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -119,7 +136,7 @@ pub struct Service {
 #[derive(Clone, Debug)]
 pub struct ServiceRecord {
     last_seen_time: Instant,
-    addresses: Vec<SocketAddr>,
+    addresses: HashSet<Ipv4Addr>,
 }
 
 pub struct MdnsClient {
@@ -132,11 +149,27 @@ impl MdnsClient {
     pub fn new(service: &str) -> Result<MdnsClient, Box<dyn Error>> {
         let database = Arc::new(Mutex::new(HashMap::new()));
 
-        let socket = create_socket()?;
+        let mut sockets = Vec::new();
 
-        socket.set_multicast_loop_v4(true)?;
-        socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::new(0, 0, 0, 0))?;
-        socket.set_nonblocking(true)?;
+        for iface in if_addrs::get_if_addrs()?
+            .into_iter()
+            .filter(|i| !i.addr.is_loopback())
+            .filter_map(|i| {
+                if let IfAddr::V4(v4_addr) = i.addr {
+                    Some(v4_addr)
+                } else {
+                    None
+                }
+            })
+        {
+            let socket = create_socket(iface.ip)?;
+
+            socket.set_multicast_loop_v4(true)?;
+            socket.join_multicast_v4(&MULTICAST_ADDR, &iface.ip)?;
+            socket.set_nonblocking(true)?;
+
+            sockets.push(socket);
+        }
 
         let (exit_tx, exit_rx) = sync_channel(0);
 
@@ -148,8 +181,12 @@ impl MdnsClient {
                 match exit_rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {
-                        send_request(&socket, &service).ok();
-                        recive_response(&socket, &service, &database).ok();
+                        for socket in &sockets {
+                            send_request(&socket, &service).ok();
+                            recive_response(&socket, &service, &database).ok();
+                        }
+
+                        remove_old_entries(&database);
                     }
                 }
             }

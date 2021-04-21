@@ -13,8 +13,4 @@ repository = "https://github.com/voysys/simple_mdns_client"
 [dependencies]
 dns-parser = "0.8"
 if-addrs = "0.6"
-log = "0.4"
 net2 = "0.2"
-
-[dev-dependencies]
-env_logger = "0.8"
