@@ -129,14 +129,14 @@ fn remove_old_entries(database: &Mutex<HashMap<Service, ServiceRecord>>) {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Service {
-    host: String,
-    port: u16,
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Clone, Debug)]
 pub struct ServiceRecord {
-    last_seen_time: Instant,
-    addresses: HashSet<Ipv4Addr>,
+    pub last_seen_time: Instant,
+    pub addresses: HashSet<Ipv4Addr>,
 }
 
 pub struct MdnsClient {
