@@ -37,7 +37,7 @@ fn create_socket(addr: Ipv4Addr) -> io::Result<std::net::UdpSocket> {
         .bind((addr, MULTICAST_PORT))
 }
 
-pub fn send_request(socket: &UdpSocket, service: &str) -> Result<(), Box<dyn Error>> {
+fn send_request(socket: &UdpSocket, service: &str) {
     let mut builder = dns_parser::Builder::new_query(0, false);
     let prefer_unicast = false;
     builder.add_question(
@@ -51,11 +51,9 @@ pub fn send_request(socket: &UdpSocket, service: &str) -> Result<(), Box<dyn Err
     let addr = SocketAddr::new(MULTICAST_ADDR.into(), MULTICAST_PORT);
 
     socket.send_to(&packet_data, addr).ok();
-
-    Ok(())
 }
 
-pub fn handle_response(
+fn handle_response(
     packet: &Packet,
     service: &str,
     database: &Mutex<HashMap<Service, ServiceRecord>>,
@@ -106,7 +104,7 @@ pub fn handle_response(
     }
 }
 
-pub fn recive_response(
+fn recive_response(
     socket: &UdpSocket,
     service: &str,
     database: &Mutex<HashMap<Service, ServiceRecord>>,
