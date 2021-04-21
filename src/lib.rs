@@ -180,7 +180,7 @@ impl MdnsClient {
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {
                         for socket in &sockets {
-                            send_request(&socket, &service).ok();
+                            send_request(&socket, &service);
                             recive_response(&socket, &service, &database).ok();
                         }
 
