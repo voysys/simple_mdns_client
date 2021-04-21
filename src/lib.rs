@@ -47,7 +47,9 @@ pub fn send_request(socket: &UdpSocket, service: &str) -> Result<(), Box<dyn Err
 
     let addr = SocketAddr::new(MULTICAST_ADDR.into(), MULTICAST_PORT);
 
-    socket.send_to(&packet_data, addr).ok();
+    let res = socket.send_to(&packet_data, addr);
+
+    log::debug!("Sending query: {:?}", res);
 
     Ok(())
 }
@@ -58,7 +60,7 @@ pub fn handle_response(
     service: &str,
     database: &Mutex<HashMap<Service, ServiceRecord>>,
 ) {
-    log::info!("{:?} => {:#?}", from, packet);
+    log::debug!("{:?} => {:#?}", from, packet);
 
     if packet.header.query {
         return;
@@ -132,8 +134,8 @@ impl MdnsClient {
 
         let socket = create_socket()?;
 
-        socket.set_multicast_loop_v4(false)?;
-        socket.join_multicast_v4(&MULTICAST_ADDR, &ADDR_ANY)?;
+        socket.set_multicast_loop_v4(true)?;
+        socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::new(0, 0, 0, 0))?;
         socket.set_nonblocking(true)?;
 
         let (exit_tx, exit_rx) = sync_channel(0);
