@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     io,
-    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     sync::{
         mpsc::{sync_channel, RecvTimeoutError, SyncSender},
         Arc, Mutex,
@@ -107,6 +107,7 @@ fn send_mdns_query(socket: &UdpSocket, service_name: &str) -> Result<(), Box<dyn
 
 fn handle_response(
     packet: &Packet,
+    from: SocketAddr,
     service: &str,
     database: &Mutex<HashMap<Service, ServiceRecord>>,
 ) {
@@ -134,6 +135,7 @@ fn handle_response(
                     .and_modify(|e| e.last_seen_time = Instant::now())
                     .or_insert_with(|| ServiceRecord {
                         last_seen_time: Instant::now(),
+                        preferred_address: None,
                         addresses: HashSet::new(),
                     });
             }
@@ -149,6 +151,12 @@ fn handle_response(
         {
             for (k, v) in database.iter_mut() {
                 if k.host == name.to_string() {
+                    if let SocketAddr::V4(from) = from {
+                        if from.ip() == addr {
+                            v.preferred_address = Some(*addr);
+                        }
+                    }
+
                     v.addresses.insert(*addr);
                 }
             }
@@ -164,10 +172,10 @@ fn receive_response(
     let mut buffer: [u8; 2048] = [0; 2048];
 
     loop {
-        let len = socket.recv(&mut buffer)?;
+        let (count, from) = socket.recv_from(&mut buffer)?;
 
-        if let Ok(packet) = dns_parser::Packet::parse(&buffer[..len]) {
-            handle_response(&packet, service, database);
+        if let Ok(packet) = dns_parser::Packet::parse(&buffer[..count]) {
+            handle_response(&packet, from, service, database);
         }
     }
 }
@@ -186,6 +194,7 @@ pub struct Service {
 #[derive(Clone, Debug)]
 pub struct ServiceRecord {
     pub last_seen_time: Instant,
+    pub preferred_address: Option<Ipv4Addr>,
     pub addresses: HashSet<Ipv4Addr>,
 }
 
@@ -243,16 +252,34 @@ impl MdnsClient {
             let service = service.to_string();
             let database = database.clone();
 
-            move || loop {
-                match exit_rx.recv_timeout(Duration::from_secs(1)) {
-                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                    Err(RecvTimeoutError::Timeout) => {
-                        for socket in &sockets {
-                            send_mdns_query(socket, &service).ok();
-                            receive_response(socket, &service, &database).ok();
-                        }
+            move || {
+                for socket in &sockets {
+                    send_mdns_query(socket, &service).ok();
+                }
 
-                        remove_old_entries(&database);
+                match exit_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => (),
+                }
+
+                for socket in &sockets {
+                    receive_response(socket, &service, &database).ok();
+                }
+
+                loop {
+                    match exit_rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => {
+                            for socket in &sockets {
+                                send_mdns_query(socket, &service).ok();
+                            }
+
+                            for socket in &sockets {
+                                receive_response(socket, &service, &database).ok();
+                            }
+
+                            remove_old_entries(&database);
+                        }
                     }
                 }
             }
