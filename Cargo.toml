@@ -12,5 +12,5 @@ repository = "https://github.com/voysys/simple_mdns_client"
 
 [dependencies]
 dns-parser = "0.8"
-if-addrs = "0.6"
+if-addrs = "0.13"
 net2 = "0.2"
