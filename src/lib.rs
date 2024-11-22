@@ -201,14 +201,41 @@ impl MdnsClient {
 
         let mut sockets = Vec::new();
 
-        let socket = create_socket(Ipv4Addr::UNSPECIFIED)?;
+        #[cfg(target_os = "windows")]
+        {
+            use if_addrs::IfAddr;
 
-        socket.set_multicast_loop_v4(true)?;
-        socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
-        // socket.set_multicast_ttl_v4(255)?;
-        socket.set_nonblocking(true)?;
+            for iface in if_addrs::get_if_addrs()?
+                .into_iter()
+                .filter(|i| !i.addr.is_loopback())
+                .filter_map(|i| {
+                    if let IfAddr::V4(v4_addr) = i.addr {
+                        Some(v4_addr)
+                    } else {
+                        None
+                    }
+                })
+            {
+                let socket = create_socket(iface.ip)?;
 
-        sockets.push(socket);
+                socket.set_multicast_loop_v4(true)?;
+                socket.join_multicast_v4(&MULTICAST_ADDR, &iface.ip)?;
+                socket.set_nonblocking(true)?;
+
+                sockets.push(socket);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let socket = create_socket(Ipv4Addr::UNSPECIFIED)?;
+
+            socket.set_multicast_loop_v4(true)?;
+            socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
+            socket.set_nonblocking(true)?;
+
+            sockets.push(socket);
+        }
 
         let (exit_tx, exit_rx) = sync_channel(0);
 
